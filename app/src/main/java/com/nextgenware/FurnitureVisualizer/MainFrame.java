@@ -3,6 +3,8 @@ package com.nextgenware.FurnitureVisualizer;
 import javax.swing.*;
 import java.awt.*;
 import java.util.List;
+import javafx.application.Platform;
+
 
 import com.nextgenware.FurnitureVisualizer.model.LayoutModel;
 import com.nextgenware.FurnitureVisualizer.undo.CommandManager;
@@ -150,7 +152,12 @@ public class MainFrame extends JFrame {
             }
         });
 
-        editor2D.setOnSelectionChanged(props::setSelectedItem);
+        editor2D.setOnSelectionChanged(it -> {
+            props.setSelectedItem(it);
+
+            // Also focus 3D view
+            Platform.runLater(() -> fx3D.focusOnItem(it));
+        });
 
         add(bar, BorderLayout.NORTH);
         add(splitAll, BorderLayout.CENTER);
