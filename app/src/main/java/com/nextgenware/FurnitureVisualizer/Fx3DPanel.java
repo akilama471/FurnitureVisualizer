@@ -3,14 +3,17 @@ package com.nextgenware.FurnitureVisualizer;
 import com.nextgenware.FurnitureVisualizer.model.FurnitureItem;
 import com.nextgenware.FurnitureVisualizer.model.LayoutModel;
 
+import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
 import javafx.embed.swing.JFXPanel;
 import javafx.scene.*;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import javafx.scene.paint.Color;
 import javafx.scene.paint.PhongMaterial;
 import javafx.scene.shape.Box;
 import javafx.scene.transform.Rotate;
+import javafx.scene.input.PickResult;
 
 import javax.swing.*;
 import java.awt.BorderLayout;
@@ -18,6 +21,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+
 
 public class Fx3DPanel extends JPanel {
 
@@ -27,8 +31,9 @@ public class Fx3DPanel extends JPanel {
     // Root of 3D world
     private final Group root3d = new Group();
 
-    // Room nodes (so we can rebuild/update)
+    // Room nodes (rebuild/update)
     private final Group roomGroup = new Group();
+    private final Group gridGroup = new Group();
 
     // Furniture nodes by ID
     private final Map<String, Box> furnitureNodes = new HashMap<>();
@@ -36,29 +41,37 @@ public class Fx3DPanel extends JPanel {
     private SubScene subScene;
     private PerspectiveCamera camera;
 
-    // Navigation rig:
-    // world -> pivot (target) -> yaw -> pitch -> camera
+    // Navigation rig: pivot(target) -> yaw -> pitch -> camera
     private final Group pivot = new Group();
     private final Rotate yaw = new Rotate(0, Rotate.Y_AXIS);
     private final Rotate pitch = new Rotate(-25, Rotate.X_AXIS);
 
     // Target (orbit center) in world units
     private double targetX = 0;
-    private double targetY = -120; // slightly above floor (negative is up in this setup)
+    private double targetY = -120;
     private double targetZ = 0;
 
-    // Orbit distance (camera dolly)
+    // Orbit distance
     private double distance = 900;
 
     // Scale: 1 meter = 100 JavaFX units
     private static final double S = 100.0;
 
-    // Track previous room state (so we rebuild only if needed)
+    // Track previous room state
     private double lastRoomW = -1;
     private double lastRoomD = -1;
     private double lastRoomH = -1;
     private int lastFloorColor = 0;
     private int lastWallColor = 0;
+    private int lastGridColor = 0;
+
+    // ---------- Hover highlight ----------
+    private Box hoveredBox = null;
+    private final Map<Box, PhongMaterial> originalMaterials = new HashMap<>();
+
+    // ---------- WASD state ----------
+    private volatile boolean wDown, aDown, sDown, dDown, qDown, eDown, shiftDown;
+    private AnimationTimer navTimer;
 
     public Fx3DPanel(LayoutModel model) {
         super(new BorderLayout());
@@ -66,10 +79,8 @@ public class Fx3DPanel extends JPanel {
 
         add(fxPanel, BorderLayout.CENTER);
 
-        // Initialize JavaFX scene
         Platform.runLater(this::initFx);
 
-        // Re-render when model changes
         model.addListener(() -> Platform.runLater(this::syncFromModel));
     }
 
@@ -82,15 +93,13 @@ public class Fx3DPanel extends JPanel {
         camera.setNearClip(0.1);
         camera.setFarClip(5000);
 
-        // Build navigation rig
         pivot.getTransforms().addAll(yaw, pitch);
         pivot.getChildren().add(camera);
         root3d.getChildren().add(pivot);
 
-        // Room group inside world
         root3d.getChildren().add(roomGroup);
+        root3d.getChildren().add(gridGroup);
 
-        // Initial camera state (distance is used)
         resetView();
 
         subScene.setCamera(camera);
@@ -99,7 +108,6 @@ public class Fx3DPanel extends JPanel {
         Scene scene = new Scene(uiRoot);
         fxPanel.setScene(scene);
 
-        // Keep SubScene size synced to Swing panel size
         fxPanel.addComponentListener(new java.awt.event.ComponentAdapter() {
             @Override
             public void componentResized(java.awt.event.ComponentEvent e) {
@@ -110,10 +118,16 @@ public class Fx3DPanel extends JPanel {
             }
         });
 
+        // Make sure we can receive keyboard input
+        subScene.setFocusTraversable(true);
+
         addLights();
         buildOrUpdateRoom(true);
         syncFromModel();
-        install3dNavigationControls();
+
+        install3dNavigationControls(scene);
+        installHoverHighlight();
+        startWASDNavigationLoop();
     }
 
     private void addLights() {
@@ -126,11 +140,9 @@ public class Fx3DPanel extends JPanel {
         root3d.getChildren().addAll(amb, key);
     }
 
-    // Rebuild room if size/colors changed
+    // Rebuild room + grid if size/colors changed
     private void buildOrUpdateRoom(boolean force) {
-        if (model.room == null) {
-            return;
-        }
+        if (model.room == null) return;
 
         double w = model.room.width * S;
         double d = model.room.depth * S;
@@ -138,33 +150,33 @@ public class Fx3DPanel extends JPanel {
 
         int floorCol = model.room.floorColor;
         int wallCol = model.room.wallColor;
+        int gridCol = model.room.gridColor;
 
-        boolean changed
-                = force
-                || w != lastRoomW || d != lastRoomD || h != lastRoomH
-                || floorCol != lastFloorColor || wallCol != lastWallColor;
+        boolean changed =
+                force ||
+                w != lastRoomW || d != lastRoomD || h != lastRoomH ||
+                floorCol != lastFloorColor || wallCol != lastWallColor || gridCol != lastGridColor;
 
-        if (!changed) {
-            return;
-        }
+        if (!changed) return;
 
         lastRoomW = w;
         lastRoomD = d;
         lastRoomH = h;
         lastFloorColor = floorCol;
         lastWallColor = wallCol;
+        lastGridColor = gridCol;
 
         roomGroup.getChildren().clear();
 
         PhongMaterial floorMat = new PhongMaterial(argbToFxColor(floorCol));
-        PhongMaterial wallMat = new PhongMaterial(argbToFxColor(wallCol));
+        PhongMaterial wallMat  = new PhongMaterial(argbToFxColor(wallCol));
 
         // Floor
         Box floor = new Box(w, 5, d);
         floor.setTranslateY(0);
         floor.setMaterial(floorMat);
 
-        // Walls (thin boxes)
+        // Walls
         Box wallN = new Box(w, h, 5);
         wallN.setTranslateZ(-d / 2);
         wallN.setTranslateY(-h / 2);
@@ -187,25 +199,66 @@ public class Fx3DPanel extends JPanel {
 
         roomGroup.getChildren().addAll(floor, wallN, wallS, wallE, wallW);
 
-        // Optional: auto-center target to room center on rebuild
-        // (Keeps navigation feeling correct after room resize)
+        // Build 3D grid floor (thin strips)
+        buildGridFloor(w, d, argbToFxColor(gridCol));
+
+        // Keep target centered after room changes
         targetX = 0;
         targetZ = 0;
         applyCameraRig();
     }
 
+    private void buildGridFloor(double roomW, double roomD, Color gridColor) {
+        gridGroup.getChildren().clear();
+
+        // Grid step: 0.1m like 2D (10cm)
+        double step = 0.1 * S; // in fx units
+        if (step < 6) step = 6;
+
+        // Thickness and height
+        double thickness = 1.0;
+        double y = -1.0; // slightly above floor (floor is at y=0 with thickness 5)
+
+        PhongMaterial mat = new PhongMaterial(gridColor);
+
+        // We center room at origin in 3D:
+        // X from -roomW/2 to +roomW/2
+        // Z from -roomD/2 to +roomD/2
+        double xMin = -roomW / 2;
+        double xMax =  roomW / 2;
+        double zMin = -roomD / 2;
+        double zMax =  roomD / 2;
+
+        // Vertical lines (along Z)
+        for (double x = xMin; x <= xMax + 0.001; x += step) {
+            Box line = new Box(thickness, 0.5, roomD);
+            line.setTranslateX(x);
+            line.setTranslateY(y);
+            line.setTranslateZ(0);
+            line.setMaterial(mat);
+            gridGroup.getChildren().add(line);
+        }
+
+        // Horizontal lines (along X)
+        for (double z = zMin; z <= zMax + 0.001; z += step) {
+            Box line = new Box(roomW, 0.5, thickness);
+            line.setTranslateX(0);
+            line.setTranslateY(y);
+            line.setTranslateZ(z);
+            line.setMaterial(mat);
+            gridGroup.getChildren().add(line);
+        }
+    }
+
     // -------------- Sync model -> 3D ----------------
     private void syncFromModel() {
-        if (model.room == null) {
-            return;
-        }
+        if (model.room == null) return;
 
         buildOrUpdateRoom(false);
 
         double roomW = model.room.width * S;
         double roomD = model.room.depth * S;
 
-        // Track IDs that still exist (for removal)
         Set<String> alive = new HashSet<>();
 
         for (FurnitureItem it : model.items) {
@@ -220,13 +273,11 @@ public class Fx3DPanel extends JPanel {
 
             // Apply color
             PhongMaterial mat = (PhongMaterial) b.getMaterial();
-            if (mat == null) {
-                mat = new PhongMaterial();
-            }
+            if (mat == null) mat = new PhongMaterial();
             mat.setDiffuseColor(argbToFxColor(it.color));
             b.setMaterial(mat);
 
-            // Apply scale to size
+            // Size with scale
             double sc = (it.scale <= 0) ? 1.0 : it.scale;
             b.setWidth((it.width * sc) * S);
             b.setDepth((it.depth * sc) * S);
@@ -239,32 +290,39 @@ public class Fx3DPanel extends JPanel {
             b.setTranslateX(cx);
             b.setTranslateZ(cz);
 
-            // Sit on floor (use scaled height)
+            // Sit on floor
             b.setTranslateY(-((it.height * sc) * S) / 2);
 
-            // Rotation around Y axis
+            // Rotation
             b.getTransforms().removeIf(t -> t instanceof Rotate);
             b.getTransforms().add(new Rotate(it.rotationDeg, Rotate.Y_AXIS));
         }
 
-        // Remove deleted furniture nodes
+        // Remove deleted nodes + cleanup hover state
         furnitureNodes.entrySet().removeIf(entry -> {
             String id = entry.getKey();
+            Box box = entry.getValue();
             if (!alive.contains(id)) {
-                root3d.getChildren().remove(entry.getValue());
+                if (hoveredBox == box) {
+                    clearHoverHighlight();
+                }
+                originalMaterials.remove(box);
+                root3d.getChildren().remove(box);
                 return true;
             }
             return false;
         });
     }
 
-    // -------------- 3D Navigation Controls ----------------
-    private void install3dNavigationControls() {
+    // -------------- Mouse orbit/pan/zoom + reset ----------------
+    private void install3dNavigationControls(Scene scene) {
         final double[] last = new double[2];
 
+        subScene.setOnMouseEntered(e -> subScene.requestFocus());
         subScene.setOnMousePressed(e -> {
             last[0] = e.getSceneX();
             last[1] = e.getSceneY();
+            subScene.requestFocus();
         });
 
         subScene.setOnMouseDragged(e -> {
@@ -276,69 +334,122 @@ public class Fx3DPanel extends JPanel {
             boolean panMode = (e.getButton() == MouseButton.SECONDARY) || e.isShiftDown();
 
             if (!panMode) {
-                // ORBIT (Left drag)
+                // ORBIT
                 yaw.setAngle(yaw.getAngle() + dx * 0.35);
                 pitch.setAngle(clamp(pitch.getAngle() - dy * 0.25, -80, -10));
             } else {
-                // PAN (Right drag OR Shift+Left)
-                // Pan scale depends on distance for consistent feel
+                // PAN target in X/Z
                 double panScale = Math.max(0.2, distance / 1200.0);
-
-                // Move target in X/Z plane (screen-space-ish)
-                // dx -> left/right, dy -> forward/back
                 targetX += (-dx * panScale);
                 targetZ += (-dy * panScale);
             }
-
             applyCameraRig();
         });
 
         subScene.setOnScroll(e -> {
-            // ZOOM (wheel)
             double delta = e.getDeltaY();
-
-            // Positive delta => zoom in => smaller distance
             distance = clamp(distance - delta * 0.9, 250, 2500);
             applyCameraRig();
         });
 
         subScene.setOnMouseClicked(e -> {
-            // Double-click to reset view
-            if (e.getClickCount() == 2) {
-                resetView();
-            }
+            if (e.getClickCount() == 2) resetView();
+        });
+
+        // -------- Keyboard (WASD) --------
+        scene.setOnKeyPressed(e -> {
+            KeyCode k = e.getCode();
+            if (k == KeyCode.W) wDown = true;
+            if (k == KeyCode.A) aDown = true;
+            if (k == KeyCode.S) sDown = true;
+            if (k == KeyCode.D) dDown = true;
+
+            if (k == KeyCode.Q) qDown = true;
+            if (k == KeyCode.E) eDown = true;
+
+            if (k == KeyCode.SHIFT) shiftDown = true;
+        });
+
+        scene.setOnKeyReleased(e -> {
+            KeyCode k = e.getCode();
+            if (k == KeyCode.W) wDown = false;
+            if (k == KeyCode.A) aDown = false;
+            if (k == KeyCode.S) sDown = false;
+            if (k == KeyCode.D) dDown = false;
+
+            if (k == KeyCode.Q) qDown = false;
+            if (k == KeyCode.E) eDown = false;
+
+            if (k == KeyCode.SHIFT) shiftDown = false;
         });
     }
 
     private void resetView() {
         yaw.setAngle(25);
         pitch.setAngle(-25);
-
-        // Center target at room center (origin)
         targetX = 0;
         targetZ = 0;
-
-        // Slightly above floor
         targetY = -120;
-
-        // Default distance
         distance = 900;
-
         applyCameraRig();
     }
 
     private void applyCameraRig() {
-        // Move pivot to orbit target
         pivot.setTranslateX(targetX);
         pivot.setTranslateY(targetY);
         pivot.setTranslateZ(targetZ);
 
-        // Camera sits at -distance in Z of pivot (because pivot rotates)
         camera.setTranslateX(0);
         camera.setTranslateY(0);
         camera.setTranslateZ(-distance);
     }
 
+    // -------------- WASD loop (smooth movement) ----------------
+    private void startWASDNavigationLoop() {
+        navTimer = new AnimationTimer() {
+            private long lastNs = 0;
+
+            @Override
+            public void handle(long now) {
+                if (lastNs == 0) {
+                    lastNs = now;
+                    return;
+                }
+
+                double dt = (now - lastNs) / 1_000_000_000.0;
+                lastNs = now;
+
+                // Movement speed depends on zoom distance (nice feel)
+                double base = Math.max(80, distance * 0.20); // units/sec
+                if (shiftDown) base *= 2.2;
+
+                double move = base * dt;
+
+                boolean changed = false;
+
+                // Move in camera-facing direction on XZ plane based on yaw
+                double yawRad = Math.toRadians(yaw.getAngle());
+                double forwardX = Math.sin(yawRad);
+                double forwardZ = Math.cos(yawRad);
+                double rightX = Math.cos(yawRad);
+                double rightZ = -Math.sin(yawRad);
+
+                if (wDown) { targetX += forwardX * move; targetZ += forwardZ * move; changed = true; }
+                if (sDown) { targetX -= forwardX * move; targetZ -= forwardZ * move; changed = true; }
+                if (dDown) { targetX += rightX   * move; targetZ += rightZ   * move; changed = true; }
+                if (aDown) { targetX -= rightX   * move; targetZ -= rightZ   * move; changed = true; }
+
+                // Up/down (Q/E)
+                if (qDown) { targetY -= move * 0.6; changed = true; }
+                if (eDown) { targetY += move * 0.6; changed = true; }
+
+                if (changed) applyCameraRig();
+            }
+        };
+        navTimer.start();
+    }
+
+    
     // Focus camera on specific furniture item
     public void focusOnItem(FurnitureItem it) {
         if (it == null || model.room == null) {
@@ -364,6 +475,68 @@ public class Fx3DPanel extends JPanel {
         distance = Math.max(400, maxSize * S * 4);
 
         applyCameraRig();
+    }
+
+
+    // -------------- Hover Highlight ----------------
+    private void installHoverHighlight() {
+        subScene.setOnMouseMoved(e -> {
+            PickResult pr = e.getPickResult();
+            if (pr == null) { clearHoverHighlight(); return; }
+
+            Node n = pr.getIntersectedNode();
+            if (!(n instanceof Box box)) {
+                clearHoverHighlight();
+                return;
+            }
+
+            // Only highlight furniture boxes (not floor/grid/walls)
+            if (!furnitureNodes.containsValue(box)) {
+                clearHoverHighlight();
+                return;
+            }
+
+            if (hoveredBox == box) return; // already highlighted
+
+            clearHoverHighlight();
+            hoveredBox = box;
+
+            PhongMaterial current = (PhongMaterial) box.getMaterial();
+            if (current == null) current = new PhongMaterial(Color.LIGHTBLUE);
+
+            // Save original
+            originalMaterials.put(box, current);
+
+            // Create highlight material (brighter + slight emissive)
+            PhongMaterial hi = new PhongMaterial();
+            hi.setDiffuseColor(brighten(current.getDiffuseColor(), 1.25));
+            hi.setSpecularColor(Color.WHITE);
+            hi.setSpecularPower(64);
+
+            box.setMaterial(hi);
+        });
+
+        subScene.setOnMouseExited(e -> clearHoverHighlight());
+    }
+
+    private void clearHoverHighlight() {
+        if (hoveredBox == null) return;
+
+        PhongMaterial orig = originalMaterials.get(hoveredBox);
+        if (orig != null) hoveredBox.setMaterial(orig);
+
+        hoveredBox = null;
+    }
+
+    private Color brighten(Color c, double factor) {
+        double r = clamp01(c.getRed() * factor);
+        double g = clamp01(c.getGreen() * factor);
+        double b = clamp01(c.getBlue() * factor);
+        return new Color(r, g, b, c.getOpacity());
+    }
+
+    private double clamp01(double v) {
+        return Math.max(0.0, Math.min(1.0, v));
     }
 
     // Convert ARGB int (0xAARRGGBB) to JavaFX Color
