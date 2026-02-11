@@ -21,7 +21,7 @@ nbdist/
 ###############################################################################
 # GRADLE
 ###############################################################################
-/.gradle/
+.gradle/
 /build/
 
 # Keep wrapper
@@ -43,6 +43,8 @@ gradle.properties.local
 *.zip
 *.tar.gz
 *.rar
+*.bin
+*.lock
 
 # JVM crash logs
 hs_err_pid*

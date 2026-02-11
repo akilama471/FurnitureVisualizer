@@ -171,6 +171,33 @@ public class Editor2DPanel extends JPanel {
         primarySelected = newItems.get(newItems.size() - 1);
         notifySelectionChanged();
     }
+    
+    public void selectById(String id) {
+    if (id == null) {
+        // clear
+        selection.clear();
+        primarySelected = null;
+        notifySelectionChanged();
+        repaint();
+        return;
+    }
+
+    FurnitureItem found = null;
+    for (FurnitureItem it : model.items) {
+        if (id.equals(it.id)) {
+            found = it;
+            break;
+        }
+    }
+
+    selection.clear();
+    if (found != null) selection.add(found);
+    primarySelected = found;
+
+    notifySelectionChanged();
+    repaint();
+}
+
 
     // ---------------- Input ----------------
     private void installKeyHandlers() {

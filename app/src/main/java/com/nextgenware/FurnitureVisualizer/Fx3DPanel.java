@@ -22,11 +22,11 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-
 public class Fx3DPanel extends JPanel {
 
     private final LayoutModel model;
     private final JFXPanel fxPanel = new JFXPanel();
+    private java.util.function.Consumer<String> onFurnitureClicked;
 
     // Root of 3D world
     private final Group root3d = new Group();
@@ -65,6 +65,17 @@ public class Fx3DPanel extends JPanel {
     private int lastWallColor = 0;
     private int lastGridColor = 0;
 
+    // ---------- 3D Move (Blender-like) ----------
+    private boolean moveMode = false;     // G key toggle
+    private char axisLock = 0;            // 0=free, 'X','Y','Z'
+    private String selectedId = null;
+
+    private double dragStartMouseX, dragStartMouseY;
+    private double dragStartItemX, dragStartItemY, dragStartItemZ;
+
+// tweak sensitivity
+    private static final double DRAG_SENS = 0.01; // screen pixels -> world units
+
     // ---------- Hover highlight ----------
     private Box hoveredBox = null;
     private final Map<Box, PhongMaterial> originalMaterials = new HashMap<>();
@@ -82,6 +93,14 @@ public class Fx3DPanel extends JPanel {
         Platform.runLater(this::initFx);
 
         model.addListener(() -> Platform.runLater(this::syncFromModel));
+    }
+
+    public void setSelectedId(String id) {
+        this.selectedId = id;
+    }
+
+    public void setOnFurnitureClicked(java.util.function.Consumer<String> cb) {
+        this.onFurnitureClicked = cb;
     }
 
     // -------------- JavaFX init ----------------
@@ -142,7 +161,9 @@ public class Fx3DPanel extends JPanel {
 
     // Rebuild room + grid if size/colors changed
     private void buildOrUpdateRoom(boolean force) {
-        if (model.room == null) return;
+        if (model.room == null) {
+            return;
+        }
 
         double w = model.room.width * S;
         double d = model.room.depth * S;
@@ -152,12 +173,14 @@ public class Fx3DPanel extends JPanel {
         int wallCol = model.room.wallColor;
         int gridCol = model.room.gridColor;
 
-        boolean changed =
-                force ||
-                w != lastRoomW || d != lastRoomD || h != lastRoomH ||
-                floorCol != lastFloorColor || wallCol != lastWallColor || gridCol != lastGridColor;
+        boolean changed
+                = force
+                || w != lastRoomW || d != lastRoomD || h != lastRoomH
+                || floorCol != lastFloorColor || wallCol != lastWallColor || gridCol != lastGridColor;
 
-        if (!changed) return;
+        if (!changed) {
+            return;
+        }
 
         lastRoomW = w;
         lastRoomD = d;
@@ -169,7 +192,7 @@ public class Fx3DPanel extends JPanel {
         roomGroup.getChildren().clear();
 
         PhongMaterial floorMat = new PhongMaterial(argbToFxColor(floorCol));
-        PhongMaterial wallMat  = new PhongMaterial(argbToFxColor(wallCol));
+        PhongMaterial wallMat = new PhongMaterial(argbToFxColor(wallCol));
 
         // Floor
         Box floor = new Box(w, 5, d);
@@ -213,7 +236,9 @@ public class Fx3DPanel extends JPanel {
 
         // Grid step: 0.1m like 2D (10cm)
         double step = 0.1 * S; // in fx units
-        if (step < 6) step = 6;
+        if (step < 6) {
+            step = 6;
+        }
 
         // Thickness and height
         double thickness = 1.0;
@@ -225,9 +250,9 @@ public class Fx3DPanel extends JPanel {
         // X from -roomW/2 to +roomW/2
         // Z from -roomD/2 to +roomD/2
         double xMin = -roomW / 2;
-        double xMax =  roomW / 2;
+        double xMax = roomW / 2;
         double zMin = -roomD / 2;
-        double zMax =  roomD / 2;
+        double zMax = roomD / 2;
 
         // Vertical lines (along Z)
         for (double x = xMin; x <= xMax + 0.001; x += step) {
@@ -252,7 +277,9 @@ public class Fx3DPanel extends JPanel {
 
     // -------------- Sync model -> 3D ----------------
     private void syncFromModel() {
-        if (model.room == null) return;
+        if (model.room == null) {
+            return;
+        }
 
         buildOrUpdateRoom(false);
 
@@ -273,7 +300,9 @@ public class Fx3DPanel extends JPanel {
 
             // Apply color
             PhongMaterial mat = (PhongMaterial) b.getMaterial();
-            if (mat == null) mat = new PhongMaterial();
+            if (mat == null) {
+                mat = new PhongMaterial();
+            }
             mat.setDiffuseColor(argbToFxColor(it.color));
             b.setMaterial(mat);
 
@@ -291,7 +320,9 @@ public class Fx3DPanel extends JPanel {
             b.setTranslateZ(cz);
 
             // Sit on floor
-            b.setTranslateY(-((it.height * sc) * S) / 2);
+            double baseY = -((it.height * sc) * S) / 2;     // sits on floor
+            double liftY = -(it.y * S);                     // y meters up (negative is up here)
+            b.setTranslateY(baseY + liftY);
 
             // Rotation
             b.getTransforms().removeIf(t -> t instanceof Rotate);
@@ -320,12 +351,65 @@ public class Fx3DPanel extends JPanel {
 
         subScene.setOnMouseEntered(e -> subScene.requestFocus());
         subScene.setOnMousePressed(e -> {
+            if (moveMode && selectedId != null) {
+                FurnitureItem it = findItemById(selectedId);
+                if (it != null) {
+                    dragStartMouseX = e.getSceneX();
+                    dragStartMouseY = e.getSceneY();
+
+                    dragStartItemX = it.x;
+                    dragStartItemY = it.y;
+                    dragStartItemZ = it.z;
+                }
+            }
             last[0] = e.getSceneX();
             last[1] = e.getSceneY();
             subScene.requestFocus();
+
         });
 
         subScene.setOnMouseDragged(e -> {
+            if (moveMode && selectedId != null) {
+                FurnitureItem it = findItemById(selectedId);
+                if (it == null) {
+                    return;
+                }
+
+                double dx = e.getSceneX() - dragStartMouseX;
+                double dy = e.getSceneY() - dragStartMouseY;
+
+                // Convert screen drag -> meters
+                double mx = dx * DRAG_SENS;
+                double my = -dy * DRAG_SENS;
+                double mz = -dy * DRAG_SENS;
+
+                // Axis lock
+                if (axisLock == 'X') {
+                    it.x = dragStartItemX + mx;
+                    it.z = dragStartItemZ;
+                    it.y = dragStartItemY;
+                } else if (axisLock == 'Z') {
+                    it.z = dragStartItemZ + mz;
+                    it.x = dragStartItemX;
+                    it.y = dragStartItemY;
+                } else if (axisLock == 'Y') {
+                    it.y = Math.max(0, dragStartItemY + my); // keep above floor
+                    it.x = dragStartItemX;
+                    it.z = dragStartItemZ;
+                } else {
+                    // free move on floor (X + Z)
+                    it.x = dragStartItemX + mx;
+                    it.z = dragStartItemZ + mz;
+                    it.y = dragStartItemY;
+                }
+
+                // Keep inside room for X/Z
+                constrainInsideRoom3D(it);
+
+                model.notifyChanged(); // triggers 2D + 3D sync
+                return; // IMPORTANT: don't orbit/pan while moving
+            }
+
             double dx = e.getSceneX() - last[0];
             double dy = e.getSceneY() - last[1];
             last[0] = e.getSceneX();
@@ -353,34 +437,87 @@ public class Fx3DPanel extends JPanel {
         });
 
         subScene.setOnMouseClicked(e -> {
-            if (e.getClickCount() == 2) resetView();
+            if (e.getClickCount() == 2) {
+                resetView();
+            }
         });
 
         // -------- Keyboard (WASD) --------
         scene.setOnKeyPressed(e -> {
             KeyCode k = e.getCode();
-            if (k == KeyCode.W) wDown = true;
-            if (k == KeyCode.A) aDown = true;
-            if (k == KeyCode.S) sDown = true;
-            if (k == KeyCode.D) dDown = true;
+            if (k == KeyCode.W) {
+                wDown = true;
+            }
+            if (k == KeyCode.A) {
+                aDown = true;
+            }
+            if (k == KeyCode.S) {
+                sDown = true;
+            }
+            if (k == KeyCode.D) {
+                dDown = true;
+            }
 
-            if (k == KeyCode.Q) qDown = true;
-            if (k == KeyCode.E) eDown = true;
+            if (k == KeyCode.Q) {
+                qDown = true;
+            }
+            if (k == KeyCode.E) {
+                eDown = true;
+            }
 
-            if (k == KeyCode.SHIFT) shiftDown = true;
+            if (k == KeyCode.SHIFT) {
+                shiftDown = true;
+            }
+            if (k == KeyCode.G) {
+                moveMode = !moveMode;
+                axisLock = 0;
+            }
+
+// Axis lock while moving
+            if (moveMode) {
+                if (k == KeyCode.X) {
+                    axisLock = 'X';
+                }
+                if (k == KeyCode.Y) {
+                    axisLock = 'Y';
+                }
+                if (k == KeyCode.Z) {
+                    axisLock = 'Z';
+                }
+
+                // ESC cancel
+                if (k == KeyCode.ESCAPE) {
+                    moveMode = false;
+                    axisLock = 0;
+                }
+            }
         });
 
         scene.setOnKeyReleased(e -> {
             KeyCode k = e.getCode();
-            if (k == KeyCode.W) wDown = false;
-            if (k == KeyCode.A) aDown = false;
-            if (k == KeyCode.S) sDown = false;
-            if (k == KeyCode.D) dDown = false;
+            if (k == KeyCode.W) {
+                wDown = false;
+            }
+            if (k == KeyCode.A) {
+                aDown = false;
+            }
+            if (k == KeyCode.S) {
+                sDown = false;
+            }
+            if (k == KeyCode.D) {
+                dDown = false;
+            }
 
-            if (k == KeyCode.Q) qDown = false;
-            if (k == KeyCode.E) eDown = false;
+            if (k == KeyCode.Q) {
+                qDown = false;
+            }
+            if (k == KeyCode.E) {
+                eDown = false;
+            }
 
-            if (k == KeyCode.SHIFT) shiftDown = false;
+            if (k == KeyCode.SHIFT) {
+                shiftDown = false;
+            }
         });
     }
 
@@ -421,7 +558,9 @@ public class Fx3DPanel extends JPanel {
 
                 // Movement speed depends on zoom distance (nice feel)
                 double base = Math.max(80, distance * 0.20); // units/sec
-                if (shiftDown) base *= 2.2;
+                if (shiftDown) {
+                    base *= 2.2;
+                }
 
                 double move = base * dt;
 
@@ -434,22 +573,45 @@ public class Fx3DPanel extends JPanel {
                 double rightX = Math.cos(yawRad);
                 double rightZ = -Math.sin(yawRad);
 
-                if (wDown) { targetX += forwardX * move; targetZ += forwardZ * move; changed = true; }
-                if (sDown) { targetX -= forwardX * move; targetZ -= forwardZ * move; changed = true; }
-                if (dDown) { targetX += rightX   * move; targetZ += rightZ   * move; changed = true; }
-                if (aDown) { targetX -= rightX   * move; targetZ -= rightZ   * move; changed = true; }
+                if (wDown) {
+                    targetX += forwardX * move;
+                    targetZ += forwardZ * move;
+                    changed = true;
+                }
+                if (sDown) {
+                    targetX -= forwardX * move;
+                    targetZ -= forwardZ * move;
+                    changed = true;
+                }
+                if (dDown) {
+                    targetX += rightX * move;
+                    targetZ += rightZ * move;
+                    changed = true;
+                }
+                if (aDown) {
+                    targetX -= rightX * move;
+                    targetZ -= rightZ * move;
+                    changed = true;
+                }
 
                 // Up/down (Q/E)
-                if (qDown) { targetY -= move * 0.6; changed = true; }
-                if (eDown) { targetY += move * 0.6; changed = true; }
+                if (qDown) {
+                    targetY -= move * 0.6;
+                    changed = true;
+                }
+                if (eDown) {
+                    targetY += move * 0.6;
+                    changed = true;
+                }
 
-                if (changed) applyCameraRig();
+                if (changed) {
+                    applyCameraRig();
+                }
             }
         };
         navTimer.start();
     }
 
-    
     // Focus camera on specific furniture item
     public void focusOnItem(FurnitureItem it) {
         if (it == null || model.room == null) {
@@ -477,12 +639,14 @@ public class Fx3DPanel extends JPanel {
         applyCameraRig();
     }
 
-
     // -------------- Hover Highlight ----------------
     private void installHoverHighlight() {
         subScene.setOnMouseMoved(e -> {
             PickResult pr = e.getPickResult();
-            if (pr == null) { clearHoverHighlight(); return; }
+            if (pr == null) {
+                clearHoverHighlight();
+                return;
+            }
 
             Node n = pr.getIntersectedNode();
             if (!(n instanceof Box box)) {
@@ -496,13 +660,16 @@ public class Fx3DPanel extends JPanel {
                 return;
             }
 
-            if (hoveredBox == box) return; // already highlighted
-
+            if (hoveredBox == box) {
+                return; // already highlighted
+            }
             clearHoverHighlight();
             hoveredBox = box;
 
             PhongMaterial current = (PhongMaterial) box.getMaterial();
-            if (current == null) current = new PhongMaterial(Color.LIGHTBLUE);
+            if (current == null) {
+                current = new PhongMaterial(Color.LIGHTBLUE);
+            }
 
             // Save original
             originalMaterials.put(box, current);
@@ -517,13 +684,52 @@ public class Fx3DPanel extends JPanel {
         });
 
         subScene.setOnMouseExited(e -> clearHoverHighlight());
+        subScene.setOnMouseClicked(e -> {
+            // Double click still resets view (your existing handler may do this elsewhere)
+            // So only handle single click here.
+            if (e.getClickCount() != 1) {
+                return;
+            }
+
+            PickResult pr = e.getPickResult();
+            if (pr == null) {
+                return;
+            }
+
+            Node n = pr.getIntersectedNode();
+            if (!(n instanceof Box box)) {
+                return;
+            }
+
+            // Only furniture
+            if (!furnitureNodes.containsValue(box)) {
+                return;
+            }
+
+            // Find the ID for this box
+            String clickedId = null;
+            for (Map.Entry<String, Box> entry : furnitureNodes.entrySet()) {
+                if (entry.getValue() == box) {
+                    clickedId = entry.getKey();
+                    break;
+                }
+            }
+
+            if (clickedId != null && onFurnitureClicked != null) {
+                onFurnitureClicked.accept(clickedId);
+            }
+        });
     }
 
     private void clearHoverHighlight() {
-        if (hoveredBox == null) return;
+        if (hoveredBox == null) {
+            return;
+        }
 
         PhongMaterial orig = originalMaterials.get(hoveredBox);
-        if (orig != null) hoveredBox.setMaterial(orig);
+        if (orig != null) {
+            hoveredBox.setMaterial(orig);
+        }
 
         hoveredBox = null;
     }
@@ -551,4 +757,33 @@ public class Fx3DPanel extends JPanel {
     private double clamp(double v, double min, double max) {
         return Math.max(min, Math.min(max, v));
     }
+
+    private FurnitureItem findItemById(String id) {
+        if (id == null) {
+            return null;
+        }
+        for (FurnitureItem it : model.items) {
+            if (id.equals(it.id)) {
+                return it;
+            }
+        }
+        return null;
+    }
+
+    private void constrainInsideRoom3D(FurnitureItem it) {
+        if (model.room == null) {
+            return;
+        }
+
+        double sc = (it.scale <= 0) ? 1.0 : it.scale;
+        double hw = (it.width * sc) / 2.0;
+        double hd = (it.depth * sc) / 2.0;
+
+        it.x = Math.max(hw, Math.min(model.room.width - hw, it.x));
+        it.z = Math.max(hd, Math.min(model.room.depth - hd, it.z));
+
+        // y just clamp above floor
+        it.y = Math.max(0, it.y);
+    }
+
 }

@@ -4,7 +4,7 @@ public class FurnitureItem {
 
     public String id, type;
     public double width, depth, height;
-    public double x, z, rotationDeg;
+    public double x, z, y, rotationDeg;
     public double scale = 1.0;     // 1.0 = normal size
     public int color = 0xFFB4D2FF;
 
@@ -24,5 +24,6 @@ public class FurnitureItem {
         this.x = x;
         this.z = z;
         this.rotationDeg = rotationDeg;
+        this.y = 0;
     }
 }

@@ -5,7 +5,6 @@ import java.awt.*;
 import java.util.List;
 import javafx.application.Platform;
 
-
 import com.nextgenware.FurnitureVisualizer.model.LayoutModel;
 import com.nextgenware.FurnitureVisualizer.undo.CommandManager;
 import com.nextgenware.FurnitureVisualizer.model.FurnitureTemplate;
@@ -174,6 +173,24 @@ public class MainFrame extends JFrame {
         });
 
         updateTitle();
+        fx3D.setOnFurnitureClicked(id -> {
+            // Swing UI update must be on EDT
+            SwingUtilities.invokeLater(() -> {
+                editor2D.selectById(id);
+                // props auto-updates because selection changed callback triggers
+                // (you already wired editor2D.setOnSelectionChanged(props::setSelectedItem))
+            });
+        });
+
+        fx3D.setOnFurnitureClicked(id -> {
+            SwingUtilities.invokeLater(() -> {
+                fx3D.setSelectedId(id);     // <-- add this
+                editor2D.selectById(id);    // already added earlier
+            });
+        });
+
+        editor2D.setOnSelectionChanged(props::setSelectedItem);
+
         getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke("control Z"), "UNDO");
         getRootPane().getActionMap().put("UNDO", new AbstractAction() {
